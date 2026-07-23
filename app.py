@@ -7,12 +7,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis, LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import OneClassSVM
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from streamlit_drawable_canvas import st_canvas
 import scipy.ndimage
+import manifold
 
 # --- Configuration de la page ---
 st.set_page_config(page_title="AI Digits Classification Lab", layout="wide")
@@ -299,9 +301,9 @@ def configure_plot_theme():
     })
 
 # --- Helper: Prétraitement MNIST (Center of Mass & Bounding Box) ---
-def preprocess_to_mnist_format(gray_image, thicken_factor=0):
-    if thicken_factor > 0:
-        gray_image = scipy.ndimage.maximum_filter(gray_image, size=thicken_factor)
+def preprocess_to_mnist_format(gray_image, thicken_before=0, thicken_after=0):
+    if thicken_before > 0:
+        gray_image = scipy.ndimage.maximum_filter(gray_image, size=thicken_before)
         
     if gray_image.max() < 10:
         return np.zeros((28, 28), dtype=np.float32)
@@ -323,6 +325,9 @@ def preprocess_to_mnist_format(gray_image, thicken_factor=0):
     # L'utilisation de BILINEAR donne un rendu un peu plus net (plus proche de MNIST) que LANCZOS
     img_resized = img_cropped.resize((new_w, new_h), Image.BILINEAR)
     resized = np.array(img_resized)
+    
+    if thicken_after > 0:
+        resized = scipy.ndimage.maximum_filter(resized, size=thicken_after)
 
     # Placer dans une image 28x28 vide
     final_img = np.zeros((28, 28), dtype=np.float32)
@@ -336,6 +341,9 @@ def preprocess_to_mnist_format(gray_image, thicken_factor=0):
         shift_y = 13.5 - cy
         shift_x = 13.5 - cx
         final_img = scipy.ndimage.shift(final_img, (shift_y, shift_x), order=1, cval=0)
+
+    # Anti-aliasing mathématique pour correspondre à la distribution de pixels MNIST
+    final_img = scipy.ndimage.gaussian_filter(final_img, sigma=0.8)
 
     return np.clip(final_img, 0, 255)
 
@@ -358,14 +366,14 @@ def get_trained_pca(X, n_components):
     return pca, X_pca
 
 @st.cache_resource
-def get_binary_data(X, y, digit_a=0, digit_b=9):
+def get_binary_data(X, y, digit_a=0, digit_b=9, n_components=2):
     mask = (y == digit_a) | (y == digit_b)
     X_bin = X[mask]
     y_bin = y[mask]
     
     y_bin_mapped = np.where(y_bin == digit_a, 0, 1)
     
-    pca_bin = PCA(n_components=2)
+    pca_bin = PCA(n_components=n_components)
     X_bin_pca = pca_bin.fit_transform(X_bin)
     return X_bin, y_bin_mapped, pca_bin, X_bin_pca
 
@@ -378,7 +386,7 @@ def train_model(model_name, X_train, y_train, k_neighbors=5):
     elif model_name == "Logistic Regression":
         model = LogisticRegression(random_state=42)
     elif model_name == "Decision Tree":
-        model = DecisionTreeClassifier(random_state=42)
+        model = RandomForestClassifier(n_estimators=50, max_depth=15, random_state=42)
     elif model_name == "KNN":
         model = KNeighborsClassifier(n_neighbors=k_neighbors)
     elif model_name == "One-Class SVM":
@@ -392,21 +400,22 @@ def train_model(model_name, X_train, y_train, k_neighbors=5):
 @st.cache_resource
 def get_multiclass_models(X, y):
     # Séparation rapide sur les indices pour ÉVITER LE CRASH MÉMOIRE (OOM) sur Streamlit Cloud
-    # 14,000 images sont largement suffisantes pour ces modèles simples
+    # Utiliser 50% des données (35,000 images) pour garantir une haute précision 
+    # tout en gardant un temps de chargement raisonnable (OOM évité grâce aux indices)
     indices = np.arange(len(y))
-    train_idx, _ = train_test_split(indices, train_size=0.2, random_state=42, stratify=y)
+    train_idx, _ = train_test_split(indices, train_size=0.5, random_state=42, stratify=y)
     
     X_train = X[train_idx]
     y_train = y[train_idx]
     
     # 1. Modèles sur pixels bruts (plus robustes aux variations humaines)
-    knn = KNeighborsClassifier(n_neighbors=5)
+    knn = KNeighborsClassifier(n_neighbors=5, weights='distance')
     knn.fit(X_train, y_train)
     
-    lr = LogisticRegression(max_iter=300, random_state=42)
+    lr = LogisticRegression(C=0.1, max_iter=300, random_state=42, solver='lbfgs')
     lr.fit(X_train, y_train)
     
-    dt = DecisionTreeClassifier(random_state=42)
+    dt = RandomForestClassifier(n_estimators=100, max_depth=None, n_jobs=-1, random_state=42)
     dt.fit(X_train, y_train)
     
     # 2. Modèles mathématiques (requièrent une PCA car 784 variables colinéaires font planter QDA)
@@ -416,10 +425,13 @@ def get_multiclass_models(X, y):
     lda = LinearDiscriminantAnalysis()
     lda.fit(X_train_pca, y_train)
     
-    qda = QuadraticDiscriminantAnalysis()
+    qda = QuadraticDiscriminantAnalysis(reg_param=0.1)
     qda.fit(X_train_pca, y_train)
     
-    return pca, {"KNN": knn, "Logistic Regression": lr, "Decision Tree": dt}, {"LDA": lda, "QDA": qda}
+    oc_svm = OneClassSVM(kernel="rbf", gamma="scale", nu=0.01)
+    oc_svm.fit(X_train_pca)
+    
+    return pca, {"KNN": knn, "Logistic Regression": lr, "Decision Tree (RF)": dt}, {"LDA": lda, "QDA": qda}, oc_svm
 
 # --- Navigation latérale ---
 menu = st.sidebar.radio(
@@ -432,6 +444,7 @@ menu = st.sidebar.radio(
         "4. Decision Tree", 
         "5. KNN", 
         "6. One-Class SVM",
+        "7. t-SNE & UMAP",
         "✏️ Interactive Sandbox"
     ]
 )
@@ -990,6 +1003,13 @@ Il cherche ensuite l'hyperplan optimal séparant l'origine de la région de fort
 </div>
 """, unsafe_allow_html=True
             )
+
+# --- SECTION 7 : t-SNE & UMAP ---
+elif menu == "7. t-SNE & UMAP":
+    # On utilise 50 composantes PCA en entrée pour UMAP/t-SNE afin de préserver la variance
+    _, y_bin, _, X_bin_pca = get_binary_data(X, y, digit_a, digit_b, n_components=50)
+    manifold.render_manifold_page(X_bin_pca, y_bin, digit_a, digit_b, configure_plot_theme)
+
 elif menu == "✏️ Interactive Sandbox":
     st.markdown('<h1 class="gradient-text">Bac à sable interactif</h1>', unsafe_allow_html=True)
     st.markdown('<p class="gradient-subtext">Dessinez, téléversez ou sélectionnez un chiffre pour le soumettre à l\'évaluation en temps réel de tous nos modèles.</p>', unsafe_allow_html=True)
@@ -1044,8 +1064,8 @@ elif menu == "✏️ Interactive Sandbox":
             
         if uploaded_file is not None:
             image = Image.open(uploaded_file).convert('L')
-            # Réduire la résolution pour éviter des lenteurs et garder un trait épais (ex: photo 4K)
-            image.thumbnail((280, 280), Image.LANCZOS)
+            # Réduire la résolution à 400x400 max pour accélérer les calculs sans perdre les traits
+            image.thumbnail((400, 400), Image.Resampling.LANCZOS)
             img_array = np.array(image) / 255.0
             
             # Détection du fond pour savoir s'il faut inverser
@@ -1062,16 +1082,16 @@ elif menu == "✏️ Interactive Sandbox":
                 # Fond sombre (ex: screenshot), l'encre est plus claire
                 signal = img_array - bg
                 
-            # Éliminer le bruit léger
-            signal[signal < 0.08] = 0
+            # Éliminer le bruit léger (ombres, plis du papier)
+            signal[signal < 0.15] = 0
             
             if signal.max() > 0:
                 signal = signal / signal.max()
                 
             gray_scaled = (signal * 255).astype(np.uint8)
             
-            # Application du prétraitement exact MNIST avec épaississement sur la haute résolution
-            processed_28 = preprocess_to_mnist_format(gray_scaled, thicken_factor=8)
+            # Application du prétraitement exact MNIST avec épaississement de 2 pixels SUR l'image 20x20
+            processed_28 = preprocess_to_mnist_format(gray_scaled, thicken_after=2)
             
             if processed_28.max() > 0:
                 pixels = (processed_28 / 255.0).flatten().tolist()
@@ -1108,7 +1128,7 @@ elif menu == "✏️ Interactive Sandbox":
         x_input = np.array(pixels).reshape(1, -1)
         
         with st.spinner("Prédiction multi-classes en cours (0 à 9)..."):
-            pca_multi, models_raw, models_pca = get_multiclass_models(X, y)
+            pca_multi, models_raw, models_pca, anomaly_model = get_multiclass_models(X, y)
             x_input_multi_pca = pca_multi.transform(x_input)
             
             preds = {}
@@ -1118,6 +1138,8 @@ elif menu == "✏️ Interactive Sandbox":
             # Modèles sur PCA
             for name, model in models_pca.items():
                 preds[name] = model.predict(x_input_multi_pca)[0]
+                
+            is_anomaly = anomaly_model.predict(x_input_multi_pca)[0] == -1
                 
         # Affichage des prédictions sous forme de cartes d'informations
         st.subheader("Prédictions Multi-classes (0 à 9)")
@@ -1147,19 +1169,26 @@ elif menu == "✏️ Interactive Sandbox":
 <p class="metric-value purple">{"Chiffre " + str(preds['Logistic Regression'])}</p>
 </div>
 <div class="glass-card" style="text-align: center;">
-<p class="metric-title">Decision Tree</p>
-<p class="metric-value">{"Chiffre " + str(preds['Decision Tree'])}</p>
+<p class="metric-title">Random Forest</p>
+<p class="metric-value">{"Chiffre " + str(preds['Decision Tree (RF)'])}</p>
 </div>
 """,
                 unsafe_allow_html=True
             )
             
         with col_res3:
+            anomaly_color = "#EF4444" if is_anomaly else "#10B981"
+            anomaly_text = "⚠️ ANOMALIE DÉTECTÉE" if is_anomaly else "Chiffre Valide"
+            
             st.markdown(
                 f"""
 <div class="glass-card" style="text-align: center;">
-<p class="metric-title">KNN (K=5)</p>
+<p class="metric-title">KNN (K=5, Distance)</p>
 <p class="metric-value pink">{"Chiffre " + str(preds['KNN'])}</p>
+</div>
+<div class="glass-card" style="text-align: center; border-color: {anomaly_color}; border-width: 2px;">
+<p class="metric-title">Qualité du dessin (One-Class SVM)</p>
+<p class="metric-value" style="font-size: 20px; color: {anomaly_color}; -webkit-text-fill-color: {anomaly_color};">{anomaly_text}</p>
 </div>
 """,
                 unsafe_allow_html=True
