@@ -299,7 +299,10 @@ def configure_plot_theme():
     })
 
 # --- Helper: Prétraitement MNIST (Center of Mass & Bounding Box) ---
-def preprocess_to_mnist_format(gray_image, dilate=False):
+def preprocess_to_mnist_format(gray_image, thicken_factor=0):
+    if thicken_factor > 0:
+        gray_image = scipy.ndimage.maximum_filter(gray_image, size=thicken_factor)
+        
     if gray_image.max() < 10:
         return np.zeros((28, 28), dtype=np.float32)
         
@@ -317,7 +320,8 @@ def preprocess_to_mnist_format(gray_image, dilate=False):
     new_h, new_w = max(1, int(np.round(h * scale))), max(1, int(np.round(w * scale)))
     
     img_cropped = Image.fromarray(cropped)
-    img_resized = img_cropped.resize((new_w, new_h), Image.LANCZOS)
+    # L'utilisation de BILINEAR donne un rendu un peu plus net (plus proche de MNIST) que LANCZOS
+    img_resized = img_cropped.resize((new_w, new_h), Image.BILINEAR)
     resized = np.array(img_resized)
 
     # Placer dans une image 28x28 vide
@@ -329,18 +333,14 @@ def preprocess_to_mnist_format(gray_image, dilate=False):
     # Centrer selon le centre de gravité (Center of Mass)
     cy, cx = scipy.ndimage.center_of_mass(final_img)
     if not np.isnan(cy) and not np.isnan(cx):
-        shift_y = 14.0 - cy
-        shift_x = 14.0 - cx
+        shift_y = 13.5 - cy
+        shift_x = 13.5 - cx
         final_img = scipy.ndimage.shift(final_img, (shift_y, shift_x), order=1, cval=0)
-
-    if dilate:
-        # Épaissir le trait directement sur l'image 28x28 (assure ~2 pixels d'épaisseur)
-        final_img = scipy.ndimage.maximum_filter(final_img, size=2)
 
     return np.clip(final_img, 0, 255)
 
 # --- Chargement des données en Cache ---
-@st.cache_data
+@st.cache_resource
 def load_data():
     mnist = fetch_openml("mnist_784", version=1, as_frame=False)
     X = mnist.data / 255.0
@@ -391,9 +391,13 @@ def train_model(model_name, X_train, y_train, k_neighbors=5):
 
 @st.cache_resource
 def get_multiclass_models(X, y):
-    # Séparation train/test rapide (20% pour l'entraînement afin de ne pas bloquer l'UI)
+    # Séparation rapide sur les indices pour ÉVITER LE CRASH MÉMOIRE (OOM) sur Streamlit Cloud
     # 14,000 images sont largement suffisantes pour ces modèles simples
-    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.2, random_state=42, stratify=y)
+    indices = np.arange(len(y))
+    train_idx, _ = train_test_split(indices, train_size=0.2, random_state=42, stratify=y)
+    
+    X_train = X[train_idx]
+    y_train = y[train_idx]
     
     # 1. Modèles sur pixels bruts (plus robustes aux variations humaines)
     knn = KNeighborsClassifier(n_neighbors=5)
@@ -1003,7 +1007,7 @@ elif menu == "✏️ Interactive Sandbox":
             st.markdown('<div class="glass-card">', unsafe_allow_html=True)
             canvas_result = st_canvas(
                 fill_color="rgba(255, 255, 255, 1)",
-                stroke_width=20,
+                stroke_width=30,
                 stroke_color="#FFFFFF",
                 background_color="#000000",
                 height=280,
@@ -1066,8 +1070,8 @@ elif menu == "✏️ Interactive Sandbox":
                 
             gray_scaled = (signal * 255).astype(np.uint8)
             
-            # Application du prétraitement exact MNIST avec dilatation
-            processed_28 = preprocess_to_mnist_format(gray_scaled, dilate=True)
+            # Application du prétraitement exact MNIST avec épaississement sur la haute résolution
+            processed_28 = preprocess_to_mnist_format(gray_scaled, thicken_factor=8)
             
             if processed_28.max() > 0:
                 pixels = (processed_28 / 255.0).flatten().tolist()
