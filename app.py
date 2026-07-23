@@ -688,7 +688,7 @@ La fonction discriminante quadratique de QDA s'écrit :
             )
             st.latex(r"\delta_k(x) = -\frac{1}{2} \ln |\Sigma_k| - \frac{1}{2} (x - \mu_k)^T \Sigma_k^{-1} (x - \mu_k) + \ln \pi_k")
             st.markdown(
-                """
+                r"""
 Pour la LDA, on fait l'hypothèse que tous les groupes ont la même matrice de covariance ($\Sigma_k = \Sigma$), ce qui linéarise le terme quadratique.
 </div>
 """, unsafe_allow_html=True
@@ -707,7 +707,7 @@ elif menu == "3. Logistic Regression":
     with col1:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.subheader("Régression Logistique 2D")
-        st.info("La régression logistique cherche la frontière linéaire optimale qui sépare la probabilité $P(Y=1|X) > 0.5$ de $P(Y=1|X) \leq 0.5$.")
+        st.info(r"La régression logistique cherche la frontière linéaire optimale qui sépare la probabilité $P(Y=1|X) > 0.5$ de $P(Y=1|X) \leq 0.5$.")
         model = train_model("Logistic Regression", X_train, y_train)
         st.markdown('</div>', unsafe_allow_html=True)
         
